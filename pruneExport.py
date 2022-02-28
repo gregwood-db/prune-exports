@@ -62,7 +62,7 @@ def prune_all_resources(tags, src_path, dst_path, overwrite):
     return 0
 
 
-def safe_copy(src, dst, overwrite):
+def safe_copy(src, dst, overwrite=False):
     """Copies a file or directory with overwrite protection."""
     if overwrite:
         if os.path.isfile(src):
@@ -255,7 +255,9 @@ def prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
 
     if os.path.isfile(dst_users_dirs) and not overwrite:
         print("Found existing user_dirs.log; skipping pruning...")
-        return
+        do_copy = False
+    else:
+        do_copy = True
 
     # first step through directories to copy appropriate objects
     copied_dirs = []
@@ -266,12 +268,14 @@ def prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
             obj_id = json.loads(line)["object_id"]
             # copy any top-level directories
             if len(dir_name.split("/")) == 2:
-                dst.write(line)
+                if do_copy:
+                    dst.write(line)
             # copy User directories where usernames match
             elif dir_name.split("/")[1] == "Users":
                 user = dir_name.split("/")[2]
                 if user in users_to_keep:
-                    dst.write(line)
+                    if do_copy:
+                        dst.write(line)
                     copied_dirs.append(dir_name)
                     dir_ids.append(obj_id)
             # copy team directories where team name matches tag
@@ -280,12 +284,18 @@ def prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
                 # sometimes directory is /team/team_name and sometimes /team/name
                 if [x for x in tags if x.replace("_", "-") in team] or\
                         [x for x in tags if x.split("team_")[1] in team]:
-                    dst.write(line)
+                    if do_copy:
+                        dst.write(line)
                     copied_dirs.append(dir_name)
                     dir_ids.append(obj_id)
 
     # next step through object metadata to copy appropriate items
-    copied_files = []
+    if os.path.isfile(dst_users_ws) and not overwrite:
+        print("Found existing user_workspace.log; skipping pruning...")
+        do_copy = False
+    else:
+        do_copy = True
+
     file_ids = []
     with open(src_users_ws, 'r') as src, open(dst_users_ws, 'w') as dst:
         for line in src:
@@ -293,32 +303,40 @@ def prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
             file_id = json.loads(line)['object_id']
             # copy all files in directories copied above
             if [x for x in copied_dirs if x in file_name]:
-                dst.write(line)
-                copied_files.append(file_name)
+                if do_copy:
+                    dst.write(line)
                 file_ids.append(file_id)
 
     # copy directory ACLs
-    with open(src_dir_acls, 'r') as src, open(dst_dir_acls, 'w') as dst:
-        for line in src:
-            obj_id = json.loads(line)["object_id"].split("/directories/")[1]
-            if int(obj_id) in dir_ids:
-                dst.write(line)
+    if os.path.isfile(dst_dir_acls) and not overwrite:
+        print("Found existing acl_directories.log; skipping pruning...")
+    else:
+        with open(src_dir_acls, 'r') as src, open(dst_dir_acls, 'w') as dst:
+            for line in src:
+                obj_id = json.loads(line)["object_id"].split("/directories/")[1]
+                if int(obj_id) in dir_ids:
+                    dst.write(line)
 
     # copy object ACLs
-    with open(src_obj_acls, 'r') as src, open(dst_obj_acls, 'w') as dst:
-        for line in src:
-            obj_id = json.loads(line)["object_id"].split("/notebooks/")[1]
-            if int(obj_id) in file_ids:
-                dst.write(line)
+    if os.path.isfile(dst_obj_acls) and not overwrite:
+        print("Found existing acl_notebooks.log; skipping pruning...")
+    else:
+        with open(src_obj_acls, 'r') as src, open(dst_obj_acls, 'w') as dst:
+            for line in src:
+                obj_id = json.loads(line)["object_id"].split("/notebooks/")[1]
+                if int(obj_id) in file_ids:
+                    dst.write(line)
 
     # copy workspace libraries
-    with open(src_libraries, 'r') as src, open(dst_libraries, 'w') as dst:
-        for line in src:
-            file_name = json.loads(line)['path']
-            # copy all files in directories copied above
-            if [x for x in copied_dirs if x in file_name]:
-                dst.write(line)
-                copied_files.append(file_name)
+    if os.path.isfile(dst_libraries) and not overwrite:
+        print("Found existing libraries.log; skipping pruning...")
+    else:
+        with open(src_libraries, 'r') as src, open(dst_libraries, 'w') as dst:
+            for line in src:
+                file_name = json.loads(line)['path']
+                # copy all files in directories copied above
+                if [x for x in copied_dirs if x in file_name]:
+                    dst.write(line)
 
 
 def get_parser():
