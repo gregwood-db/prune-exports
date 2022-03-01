@@ -2,10 +2,10 @@ import json
 import os
 import argparse
 import shutil
+import pandas as pd
 
 
-def prune_all_resources(tags, src_path, dst_path, overwrite):
-
+def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag):
     # check if source folder exists
     if not os.path.isdir(src_path):
         print("Error: could not find source path.")
@@ -40,7 +40,7 @@ def prune_all_resources(tags, src_path, dst_path, overwrite):
     prune_users(users_to_keep, src_path, dst_path, overwrite)
 
     # prune workspace metadata
-    print("Pruning workspace metadata (this may take several minutes)...")
+    print("Pruning workspace metadata...")
     prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
 
     # copy other resources from source to dest
@@ -53,13 +53,24 @@ def prune_all_resources(tags, src_path, dst_path, overwrite):
               os.path.join(dst_path, "acl_cluster_policies.log"), overwrite)
     safe_copy(os.path.join(src_path, "table_acls"),
               os.path.join(dst_path, "table_acls"), overwrite)
-    safe_copy(os.path.join(src_path, "metastore"),
-              os.path.join(dst_path, "metastore"), overwrite)
     safe_copy(os.path.join(src_path, "database_details.log"),
               os.path.join(dst_path, "database_details.log"), overwrite)
 
+    if not metastore_flag:
+        safe_copy(os.path.join(src_path, "metastore"),
+                  os.path.join(dst_path, "metastore"), overwrite)
+
     print("Finished pruning resources.")
     return 0
+
+
+def write_multiline_df(df, file):
+    """Writes a multi-line DataFrame to a json file without escaping slashes (as Pandas does)"""
+    df_json = json.loads(df.to_json(orient="records"))
+
+    with open(file, 'w') as f:
+        for item in df_json:
+            f.write(json.dumps(item) + "\n")
 
 
 def safe_copy(src, dst, overwrite=False):
@@ -88,41 +99,24 @@ def prune_clusters(tags, src_path, dst_path, overwrite):
     src_cluster_acls = os.path.join(src_path, "acl_clusters.log")
     dst_cluster_acls = os.path.join(dst_path, "acl_clusters.log")
 
+    # copy clusters to destination if required
     if os.path.isfile(dst_cluster_file) and not overwrite:
         print("Found existing clusters.log; skipping pruning...")
-        copied_clusters = []
-        with open(dst_cluster_file, 'r') as f:
-            for line in f:
-                cluster = json.loads(line)
-                copied_clusters.append(cluster["cluster_id"])
+        clusters_df = pd.read_json(dst_cluster_file, lines=True)
     else:
-        copied_clusters = []
-        with open(src_cluster_file, 'r') as src, open(dst_cluster_file, 'w') as dst:
-            for line in src:
-                cluster = json.loads(line)
+        clusters_df = pd.read_json(src_cluster_file, lines=True)
+        clusters_df = clusters_df[clusters_df.custom_tags.apply(pd.Series).z_team.isin(tags)]
+        write_multiline_df(clusters_df, dst_cluster_file)
 
-                # make sure cluster has custom tags defined
-                if "custom_tags" not in cluster.keys():
-                    continue
+    copied_clusters = list(clusters_df.cluster_id)
 
-                # make sure cluster has the "z_team_tag" defined; if defined, check if it equals the provided tag(s)
-                cluster_tags = cluster["custom_tags"]
-                if "z_team" not in cluster_tags.keys():
-                    continue
-                # check if the team is in our list of tags; if so, write the line and record the cluster ID
-                elif cluster_tags["z_team"] in tags:
-                    dst.write(line)
-                    copied_clusters.append(cluster["cluster_id"])
-
-    # copy appropriate cluster ACLs to destination
-    if os.path.isfile(dst_cluster_file) and not overwrite:
+    # copy cluster ACLs to destination if required
+    if os.path.isfile(dst_cluster_acls) and not overwrite:
         print("Found existing acl_clusters.log; skipping pruning...")
     else:
-        with open(src_cluster_acls, 'r') as src, open(dst_cluster_acls, 'w') as dst:
-            for line in src:
-                cluster = json.loads(line)["object_id"].split("/clusters/")[1]
-                if cluster in copied_clusters:
-                    dst.write(line)
+        cluster_acls_df = pd.read_json(src_cluster_acls, lines=True)
+        cluster_acls_df = cluster_acls_df[cluster_acls_df.object_id.str.split("/").str[2].isin(copied_clusters)]
+        write_multiline_df(cluster_acls_df, dst_cluster_acls)
 
     return copied_clusters
 
@@ -136,39 +130,23 @@ def prune_jobs(tags, clusters, src_path, dst_path, overwrite):
 
     if os.path.isfile(dst_job_file) and not overwrite:
         print("Found existing jobs.log; skipping pruning...")
+        jobs_df = pd.read_json(dst_job_file, lines=True)
     else:
-        job_ids = []
-        with open(src_job_file, 'r') as src, open(dst_job_file, 'w') as dst:
-            for line in src:
-                job = json.loads(line)
-                job_keys = job["settings"].keys()
-                if "custom_tags" in job_keys:
-                    job_tags = job["settings"]["custom_tags"]
-                    if "z_team" not in job_tags:
-                        continue
-                    elif job_tags["z_team"] in tags:
-                        dst.write(line)
-                        job_ids.append(job["job_id"])
-                elif "existing_cluster_id" in job_keys:
-                    if job["settings"]["existing_cluster_id"] in clusters:
-                        dst.write(line)
-                        job_ids.append(job["job_id"])
+        jobs_df = pd.read_json(src_job_file, lines=True)
+        jobs_existing = jobs_df[jobs_df.settings.apply(pd.Series).existing_cluster_id.isin(clusters)]
+        jobs_new = jobs_df[jobs_df.settings.apply(pd.Series).new_cluster
+                           .apply(pd.Series).custom_tags.apply(pd.Series).z_team.isin(tags)]
+        jobs_df = pd.concat([jobs_existing, jobs_new])
+        write_multiline_df(jobs_df, dst_job_file)
 
     # copy job ACLs
     if os.path.isfile(dst_job_acls) and not overwrite:
         print("Found existing acl_jobs.log; skipping pruning...")
     else:
-        job_ids = []
-        with open(dst_job_file, 'r') as f:
-            for line in f:
-                job = json.loads(line)
-                job_ids.append(job["job_id"])
-
-        with open(src_job_acls, 'r') as src, open(dst_job_acls, 'w') as dst:
-            for line in src:
-                obj_id = json.loads(line)["object_id"].split("/jobs/")[1]
-                if int(obj_id) in job_ids:
-                    dst.write(line)
+        job_ids = [str(x) for x in list(jobs_df.job_id)]
+        job_acls_df = pd.read_json(src_job_acls, lines=True)
+        job_acls_df = job_acls_df[job_acls_df.object_id.str.split("/").str[2].isin(job_ids)]
+        write_multiline_df(job_acls_df, dst_job_acls)
 
 
 def prune_instance_profiles(tags, src_path, dst_path, overwrite):
@@ -180,15 +158,10 @@ def prune_instance_profiles(tags, src_path, dst_path, overwrite):
         print("Found existing instance_profiles.log; skipping pruning...")
         return
 
-    with open(src_ip_file, 'r') as src, open(dst_ip_file, 'w') as dst:
-        for line in src:
-            profile = json.loads(line)
-            arn = profile["instance_profile_arn"]
-
-            # if the tag exists in the ARN, add it to our target profiles
-            # note that tags may include _ but ARNs cannot, so replace them with -
-            if [x for x in tags if x.replace("_", "-") in arn]:
-                dst.write(line)
+    ip_df = pd.read_json(src_ip_file, lines=True)
+    ip_df = ip_df[ip_df.instance_profile_arn
+                  .apply(lambda x: any([k in x for k in [t.replace("_", "-") for t in tags]]))]
+    write_multiline_df(ip_df, dst_ip_file)
 
 
 def prune_groups(tags, src_path, dst_path, overwrite):
@@ -233,11 +206,9 @@ def prune_users(users_to_keep, src_path, dst_path, overwrite):
         print("Found existing users.log; skipping pruning...")
         return
 
-    with open(src_users_file, 'r') as src, open(dst_users_file, 'w') as dst:
-        for line in src:
-            username = json.loads(line)["userName"]
-            if username in users_to_keep:
-                dst.write(line)
+    users_df = pd.read_json(src_users_file, lines=True)
+    users_df = users_df[users_df.userName.isin(users_to_keep)]
+    write_multiline_df(users_df, dst_users_file)
 
 
 def prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite):
@@ -253,99 +224,79 @@ def prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
     src_libraries = os.path.join(src_path, "libraries.log")
     dst_libraries = os.path.join(dst_path, "libraries.log")
 
+    # check if we can skip all pruning of metadata
+    if not overwrite and \
+            (os.path.isfile(dst_users_dirs) and os.path.isfile(dst_users_dirs) and
+             os.path.isfile(dst_users_ws) and os.path.isfile(dst_dir_acls) and
+             os.path.isfile(dst_obj_acls) and os.path.isfile(dst_libraries)):
+        print("Skipping workspace metadata pruning...")
+        return
+
+    # break out directories by users and teams
+    user_dir_df = pd.read_json(src_users_dirs, lines=True)
+    top_level_dirs = user_dir_df[user_dir_df.path.str.split("/").str.len() == 2]
+    user_dirs = user_dir_df[user_dir_df.path.str.split("/", expand=True)[1] == "Users"]
+    team_dirs = user_dir_df[user_dir_df.path.str.split("/", expand=True)[1] == "teams"]
+
+    # filter user and team directories
+    user_dirs = user_dirs[user_dirs.path.str.split("/", expand=True)[2].isin(users_to_keep)]
+    tags_short = [t.split("_")[1] for t in tags]
+    team_dirs = team_dirs[team_dirs.path.str.split("/", expand=True)[2].isin(tags_short + tags)]
+    all_dirs = pd.concat([user_dirs, team_dirs])
+    copied_dirs = list(all_dirs.path)
+    dir_ids = [str(d) for d in list(all_dirs.object_id)]
+
+    # write file if it doesn't exist
     if os.path.isfile(dst_users_dirs) and not overwrite:
         print("Found existing user_dirs.log; skipping pruning...")
-        do_copy = False
     else:
-        do_copy = True
+        write_multiline_df(pd.concat([top_level_dirs, all_dirs]), dst_users_dirs)
 
-    # first step through directories to copy appropriate objects
-    copied_dirs = []
-    dir_ids = []
-    with open(src_users_dirs, 'r') as src, open(dst_users_dirs, 'w') as dst:
-        for line in src:
-            dir_name = json.loads(line)["path"]
-            obj_id = json.loads(line)["object_id"]
-            # copy any top-level directories
-            if len(dir_name.split("/")) == 2:
-                if do_copy:
-                    dst.write(line)
-            # copy User directories where usernames match
-            elif dir_name.split("/")[1] == "Users":
-                user = dir_name.split("/")[2]
-                if user in users_to_keep:
-                    if do_copy:
-                        dst.write(line)
-                    copied_dirs.append(dir_name)
-                    dir_ids.append(obj_id)
-            # copy team directories where team name matches tag
-            elif dir_name.split("/")[1] == "teams":
-                team = dir_name.split("/")[2]
-                # sometimes directory is /team/team_name and sometimes /team/name
-                if [x for x in tags if x.replace("_", "-") in team] or\
-                        [x for x in tags if x.split("team_")[1] in team]:
-                    if do_copy:
-                        dst.write(line)
-                    copied_dirs.append(dir_name)
-                    dir_ids.append(obj_id)
+    # get all workspace objects
+    workspace_df = pd.read_json(src_users_ws, lines=True)
 
-    # next step through object metadata to copy appropriate items
+    # filter per directories copied above
+    workspace_df = workspace_df[workspace_df.path.str.split("/").str[:-1].str.join("/").isin(copied_dirs)]
+    file_ids = [str(f) for f in list(workspace_df.object_id)]
+
+    # write object if it doesn't exist
     if os.path.isfile(dst_users_ws) and not overwrite:
         print("Found existing user_workspace.log; skipping pruning...")
-        do_copy = False
     else:
-        do_copy = True
-
-    file_ids = []
-    with open(src_users_ws, 'r') as src, open(dst_users_ws, 'w') as dst:
-        for line in src:
-            file_name = json.loads(line)['path']
-            file_id = json.loads(line)['object_id']
-            # copy all files in directories copied above
-            if [x for x in copied_dirs if x in file_name]:
-                if do_copy:
-                    dst.write(line)
-                file_ids.append(file_id)
+        write_multiline_df(workspace_df, dst_users_ws)
 
     # copy directory ACLs
     if os.path.isfile(dst_dir_acls) and not overwrite:
         print("Found existing acl_directories.log; skipping pruning...")
     else:
-        with open(src_dir_acls, 'r') as src, open(dst_dir_acls, 'w') as dst:
-            for line in src:
-                obj_id = json.loads(line)["object_id"].split("/directories/")[1]
-                if int(obj_id) in dir_ids:
-                    dst.write(line)
+        dir_acls_df = pd.read_json(src_dir_acls, lines=True)
+        dir_acls_df = dir_acls_df[dir_acls_df.object_id.str.split("/", expand=True)[2].isin(dir_ids)]
+        write_multiline_df(dir_acls_df, dst_dir_acls)
 
     # copy object ACLs
     if os.path.isfile(dst_obj_acls) and not overwrite:
         print("Found existing acl_notebooks.log; skipping pruning...")
     else:
-        with open(src_obj_acls, 'r') as src, open(dst_obj_acls, 'w') as dst:
-            for line in src:
-                obj_id = json.loads(line)["object_id"].split("/notebooks/")[1]
-                if int(obj_id) in file_ids:
-                    dst.write(line)
+        obj_acls_df = pd.read_json(src_obj_acls, lines=True)
+        obj_acls_df = obj_acls_df[obj_acls_df.object_id.str.split("/", expand=True)[2].isin(file_ids)]
+        write_multiline_df(obj_acls_df, dst_obj_acls)
 
     # copy workspace libraries
     if os.path.isfile(dst_libraries) and not overwrite:
         print("Found existing libraries.log; skipping pruning...")
     else:
-        with open(src_libraries, 'r') as src, open(dst_libraries, 'w') as dst:
-            for line in src:
-                file_name = json.loads(line)['path']
-                # copy all files in directories copied above
-                if [x for x in copied_dirs if x in file_name]:
-                    dst.write(line)
+        library_df = pd.read_json(src_libraries, lines=True)
+        library_df = library_df[library_df.path.str.split("/").str[:-1].str.join("/").isin(copied_dirs)]
+        write_multiline_df(library_df, dst_libraries)
 
 
 def get_parser():
     parser = argparse.ArgumentParser(description='Prune exported workspace resources using tags')
 
-    parser.add_argument("--source-path", action="store",
+    parser.add_argument("--source", action="store",
                         help="The folder containing the exported resources to be pruned.")
 
-    parser.add_argument("--target-path", action="store",
+    parser.add_argument("--target", action="store",
                         help="The folder to write the pruned artifacts.")
 
     parser.add_argument("--tags", action="store", nargs="+",
@@ -353,6 +304,9 @@ def get_parser():
 
     parser.add_argument("--overwrite", action="store_true",
                         help="If specified, overwrites the target folder.")
+
+    parser.add_argument("--skip-metastore", action="store_true",
+                        help="If specified, skip writing the metastore.")
 
     parser.add_argument('--specs', action="store",
                         help="A tab-delimited file specifying additional resources to prune.")
@@ -362,7 +316,7 @@ def get_parser():
 
 def main():
     args = get_parser().parse_args()
-    prune_all_resources(args.tags, args.source_path, args.target_path, args.overwrite)
+    prune_all_resources(args.tags, args.source, args.target, args.overwrite, args.skip_metastore)
 
 
 if __name__ == "__main__":
