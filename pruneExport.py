@@ -21,7 +21,6 @@ def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag):
     else:
         print("Destination path not found. Creating...")
         os.makedirs(dst_path)
-        os.makedirs(os.path.join(dst_path, "groups"))
 
     # prune clusters & jobs
     print("Pruning clusters...")
