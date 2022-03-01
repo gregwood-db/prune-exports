@@ -5,7 +5,7 @@ import shutil
 import pandas as pd
 
 
-def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag):
+def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag, artifacts_flag):
     # check if source folder exists
     if not os.path.isdir(src_path):
         print("Error: could not find source path.")
@@ -54,10 +54,18 @@ def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag):
               os.path.join(dst_path, "table_acls"), overwrite)
     safe_copy(os.path.join(src_path, "database_details.log"),
               os.path.join(dst_path, "database_details.log"), overwrite)
+    safe_copy(os.path.join(src_path, "secret_scopes"),
+              os.path.join(dst_path, "secret_scopes"), overwrite)
+    safe_copy(os.path.join(src_path, "secret_scopes_acls.log"),
+              os.path.join(dst_path, "secret_scopes_acls.log"), overwrite)
 
     if not metastore_flag:
         safe_copy(os.path.join(src_path, "metastore"),
                   os.path.join(dst_path, "metastore"), overwrite)
+
+    if not artifacts_flag:
+        safe_copy(os.path.join(src_path, "artifacts"),
+                  os.path.join(dst_path, "artifacts"), overwrite)
 
     print("Finished pruning resources.")
     return 0
@@ -74,6 +82,8 @@ def write_multiline_df(df, file):
 
 def safe_copy(src, dst, overwrite=False):
     """Copies a file or directory with overwrite protection."""
+    if not os.path.isfile(src) and not os.path.isdir(src):
+        print("Warning: could not find source file or directory {}; skipping copy.".format(src))
     if overwrite:
         if os.path.isfile(src):
             shutil.copy2(src, dst)
@@ -133,9 +143,13 @@ def prune_jobs(tags, clusters, src_path, dst_path, overwrite):
     else:
         jobs_df = pd.read_json(src_job_file, lines=True)
         jobs_existing = jobs_df[jobs_df.settings.apply(pd.Series).existing_cluster_id.isin(clusters)]
-        jobs_new = jobs_df[jobs_df.settings.apply(pd.Series).new_cluster
-                           .apply(pd.Series).custom_tags.apply(pd.Series).z_team.isin(tags)]
-        jobs_df = pd.concat([jobs_existing, jobs_new])
+        jobs_tags = jobs_df.settings.apply(pd.Series).new_cluster.apply(pd.Series).get("custom_tags")
+        if jobs_tags is not None:
+            jobs_new = jobs_df[jobs_tags.apply(pd.Series).z_team.isin(tags)]
+            jobs_df = pd.concat([jobs_existing, jobs_new])
+        else:
+            jobs_df = jobs_existing
+
         write_multiline_df(jobs_df, dst_job_file)
 
     # copy job ACLs
@@ -307,6 +321,9 @@ def get_parser():
     parser.add_argument("--skip-metastore", action="store_true",
                         help="If specified, skip writing the metastore.")
 
+    parser.add_argument("--skip-artifacts", action="store_true",
+                        help="If specified, skip writing the workspace artifacts.")
+
     parser.add_argument('--specs', action="store",
                         help="A tab-delimited file specifying additional resources to prune.")
 
@@ -315,7 +332,7 @@ def get_parser():
 
 def main():
     args = get_parser().parse_args()
-    prune_all_resources(args.tags, args.source, args.target, args.overwrite, args.skip_metastore)
+    prune_all_resources(args.tags, args.source, args.target, args.overwrite, args.skip_metastore, args.skip_artifacts)
 
 
 if __name__ == "__main__":
