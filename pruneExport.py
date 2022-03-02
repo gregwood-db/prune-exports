@@ -5,7 +5,7 @@ import shutil
 import pandas as pd
 
 
-def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag, artifacts_flag):
+def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag):
     # check if source folder exists
     if not os.path.isdir(src_path):
         print("Error: could not find source path.")
@@ -42,6 +42,10 @@ def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag, art
     print("Pruning workspace metadata...")
     prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
 
+    # prune workspace objects
+    print("Pruning workspace artifacts...")
+    prune_artifacts(tags, users_to_keep, src_path, dst_path, overwrite)
+
     # copy other resources from source to dest
     print("Copying additional resources to new export path...")
     safe_copy(os.path.join(src_path, "instance_pools.log"),
@@ -58,14 +62,20 @@ def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag, art
               os.path.join(dst_path, "secret_scopes"), overwrite)
     safe_copy(os.path.join(src_path, "secret_scopes_acls.log"),
               os.path.join(dst_path, "secret_scopes_acls.log"), overwrite)
+    safe_copy(os.path.join(src_path, "source_info.txt"),
+              os.path.join(dst_path, "source_info.txt"), overwrite)
+    safe_copy(os.path.join(src_path, "cluster_ids_to_change_creator.log"),
+              os.path.join(dst_path, "cluster_ids_to_change_creator.log"), overwrite)
+    safe_copy(os.path.join(src_path, "original_creator_user_ids.log"),
+              os.path.join(dst_path, "original_creator_user_ids.log"), overwrite)
+    safe_copy(os.path.join(src_path, "user_name_to_user_id.log"),
+              os.path.join(dst_path, "user_name_to_user_id.log"), overwrite)
 
     if not metastore_flag:
         safe_copy(os.path.join(src_path, "metastore"),
                   os.path.join(dst_path, "metastore"), overwrite)
-
-    if not artifacts_flag:
-        safe_copy(os.path.join(src_path, "artifacts"),
-                  os.path.join(dst_path, "artifacts"), overwrite)
+        safe_copy(os.path.join(src_path, "metastore_views"),
+                  os.path.join(dst_path, "metastore_views"), overwrite)
 
     print("Finished pruning resources.")
     return 0
@@ -108,8 +118,10 @@ def prune_clusters(tags, src_path, dst_path, overwrite):
     src_cluster_acls = os.path.join(src_path, "acl_clusters.log")
     dst_cluster_acls = os.path.join(dst_path, "acl_clusters.log")
 
-    # copy clusters to destination if required
-    if os.path.isfile(dst_cluster_file) and not overwrite:
+    if not os.path.isfile(src_cluster_file):
+        print("Warning: no clusters.log file found, skipping Cluster pruning...")
+        return []
+    elif os.path.isfile(dst_cluster_file) and not overwrite:
         print("Found existing clusters.log; skipping pruning...")
         clusters_df = pd.read_json(dst_cluster_file, lines=True)
     else:
@@ -137,7 +149,10 @@ def prune_jobs(tags, clusters, src_path, dst_path, overwrite):
     src_job_acls = os.path.join(src_path, "acl_jobs.log")
     dst_job_acls = os.path.join(dst_path, "acl_jobs.log")
 
-    if os.path.isfile(dst_job_file) and not overwrite:
+    if not os.path.isfile(src_job_file):
+        print("Warning: no jobs.log file found, skipping Job pruning...")
+        return
+    elif os.path.isfile(dst_job_file) and not overwrite:
         print("Found existing jobs.log; skipping pruning...")
         jobs_df = pd.read_json(dst_job_file, lines=True)
     else:
@@ -167,7 +182,10 @@ def prune_instance_profiles(tags, src_path, dst_path, overwrite):
     src_ip_file = os.path.join(src_path, "instance_profiles.log")
     dst_ip_file = os.path.join(dst_path, "instance_profiles.log")
 
-    if os.path.isfile(dst_ip_file) and not overwrite:
+    if not os.path.isfile(src_ip_file):
+        print("Warning: no instance_profiles.log file found, skipping Profile pruning...")
+        return
+    elif os.path.isfile(dst_ip_file) and not overwrite:
         print("Found existing instance_profiles.log; skipping pruning...")
         return
 
@@ -215,11 +233,15 @@ def prune_users(users_to_keep, src_path, dst_path, overwrite):
     src_users_file = os.path.join(src_path, "users.log")
     dst_users_file = os.path.join(dst_path, "users.log")
 
-    if os.path.isfile(dst_users_file) and not overwrite:
+    if not os.path.isfile(src_users_file):
+        print("Warning: no users.log file found, skipping Users pruning...")
+        return
+    elif os.path.isfile(dst_users_file) and not overwrite:
         print("Found existing users.log; skipping pruning...")
         return
 
     users_df = pd.read_json(src_users_file, lines=True)
+    users_df.id = users_df.id.astype(str)
     users_df = users_df[users_df.userName.isin(users_to_keep)]
     write_multiline_df(users_df, dst_users_file)
 
@@ -295,12 +317,42 @@ def prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
         write_multiline_df(obj_acls_df, dst_obj_acls)
 
     # copy workspace libraries
+    if not os.path.isfile(src_libraries):
+        print("Warning: no libraries.log file found, skipping Library pruning...")
     if os.path.isfile(dst_libraries) and not overwrite:
         print("Found existing libraries.log; skipping pruning...")
     else:
         library_df = pd.read_json(src_libraries, lines=True)
-        library_df = library_df[library_df.path.str.split("/").str[:-1].str.join("/").isin(copied_dirs)]
-        write_multiline_df(library_df, dst_libraries)
+        if len(library_df) > 0:
+            library_df = library_df[library_df.path.str.split("/").str[:-1].str.join("/").isin(copied_dirs)]
+            write_multiline_df(library_df, dst_libraries)
+
+
+def prune_artifacts(tags, users_to_keep, src_path, dst_path, overwrite):
+    """Copies workspace artifacts of pruned users and teams."""
+    src_obj_dir = os.path.join(src_path, "artifacts")
+    dst_obj_dir = os.path.join(dst_path, "artifacts")
+
+    if not os.path.isdir(dst_obj_dir):
+        os.makedirs(dst_obj_dir)
+
+    team_dir = os.path.join(src_obj_dir, "teams")
+    if os.path.isdir(team_dir):
+        dir_list = list(os.walk(team_dir))[0][1]
+        for d in dir_list:
+            if d in [x.split("_")[1] for x in tags]:
+                src = os.path.join(team_dir, d)
+                dst = os.path.join(dst_obj_dir, "teams", d)
+                safe_copy(src, dst, overwrite)
+
+    user_dir = os.path.join(src_obj_dir, "Users")
+    if os.path.isdir(team_dir):
+        dir_list = list(os.walk(user_dir))[0][1]
+        for d in dir_list:
+            if d in users_to_keep:
+                src = os.path.join(user_dir, d)
+                dst = os.path.join(dst_obj_dir, "Users", d)
+                safe_copy(src, dst, overwrite)
 
 
 def get_parser():
@@ -324,15 +376,12 @@ def get_parser():
     parser.add_argument("--skip-artifacts", action="store_true",
                         help="If specified, skip writing the workspace artifacts.")
 
-    parser.add_argument('--specs', action="store",
-                        help="A tab-delimited file specifying additional resources to prune.")
-
     return parser
 
 
 def main():
     args = get_parser().parse_args()
-    prune_all_resources(args.tags, args.source, args.target, args.overwrite, args.skip_metastore, args.skip_artifacts)
+    prune_all_resources(args.tags, args.source, args.target, args.overwrite, args.skip_metastore)
 
 
 if __name__ == "__main__":
