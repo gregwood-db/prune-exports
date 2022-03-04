@@ -5,10 +5,13 @@ import shutil
 import pandas as pd
 
 
-def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag):
-    # check if source folder exists
+def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag, artifact_flag):
+    # validate source/destination folders
     if not os.path.isdir(src_path):
         print("Error: could not find source path.")
+        return -1
+    elif src_path == dst_path:
+        print("Error: source and destination path cannot be the same!")
         return -1
 
     # check if destination folder already exists
@@ -43,8 +46,11 @@ def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag):
     prune_workspace_metadata(tags, users_to_keep, src_path, dst_path, overwrite)
 
     # prune workspace objects
-    print("Pruning workspace artifacts...")
-    prune_artifacts(tags, users_to_keep, src_path, dst_path, overwrite)
+    if not artifact_flag:
+        print("Pruning workspace artifacts...")
+        prune_artifacts(tags, users_to_keep, src_path, dst_path, overwrite)
+    else:
+        print("Skipping workspace artifacts...")
 
     # copy other resources from source to dest
     print("Copying additional resources to new export path...")
@@ -381,7 +387,7 @@ def get_parser():
 
 def main():
     args = get_parser().parse_args()
-    prune_all_resources(args.tags, args.source, args.target, args.overwrite, args.skip_metastore)
+    prune_all_resources(args.tags, args.source, args.target, args.overwrite, args.skip_metastore, args.skip_artifacts)
 
 
 if __name__ == "__main__":
