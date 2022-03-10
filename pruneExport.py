@@ -6,6 +6,11 @@ import pandas as pd
 
 
 def prune_all_resources(tags, src_path, dst_path, overwrite, metastore_flag, artifact_flag):
+    # validate tags
+    if not tags:
+        print("Error: tags parameter must not be empty.")
+        return -1
+
     # validate source/destination folders
     if not os.path.isdir(src_path):
         print("Error: could not find source path.")
